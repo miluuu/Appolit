@@ -38,7 +38,7 @@ class Gaussian_Process_Regression_GPy:
     #    self.kernel = GPy.kern.RBF(input_dim=3, variance=1., lengthscale = length_scale)
 
     def fit(self, training_data, target_values):
-        self.m = GPy.models.GPRegression(training_data, target_values, self.kernel, normalizer = None)
+        self.m = GPy.models.GPRegression(training_data, target_values, self.kernel, normalizer = True)
         self.m.optimize_restarts(num_restarts = 5)
         print("Kernel: ", self.kernel)
         print("Mean of target values:", np.mean(target_values))
@@ -91,6 +91,15 @@ class Foo:
         pass
     def predict(self, test_point):
         return 0
+
+class Foo_Preprocessor:
+    '''Test Preprocessor, doesn't transform anything.'''
+    def __init__(self):
+        pass
+    def fit_transform(self, X):
+        return X
+    def transform(self, X):
+        return X
 
 class Pseudonormal_Distribution:
     '''Sample from PN(mu, sigma^2, x_min, x_max, x_stepsize), as described in paper (Does Anything Work)'''

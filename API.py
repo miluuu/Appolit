@@ -4,25 +4,29 @@ import matplotlib.pyplot as plt
 import numpy as np
 import modelling as md
 from scipy.optimize import minimize, brute
-from sklearn.preprocessing import normalize
 import policy_improvement
 import policy_improvement_VF_only
 import policy_improvement_contr_only
 from math import floor
-from math import inf as infinity
 import outputfcts
 import pdb
 
+#TODO:DELETE
+#np.seterr(invalid='raise')
+
 class Algorithm:
     '''Performs approximate policy iteration'''
-    def __init__(self, model, max_iter, episode_max, VF_approx_architecture, optimizer_choice = 0):
+    def __init__(self, model, max_iter, episode_max, preprocessor_type, VF_approx_architecture, optimizer_choice = 0, normalize_input=0):
         self.max_iter = max_iter        #N (in Paper)
         self.episode_max = episode_max  #M (in Paper)
         self.VF_approximation = {t:  VF_approx_architecture() for t in range(model.t_max)} #updated in every iteration
+        self.preprocessor = {t: preprocessor_type() for t in range(model.t_max)}
         self.optimizer_choice = optimizer_choice
         self.ftol = 1e-15 if optimizer_choice in {0,1} else 1e-15 # precision goal for the value of objective function in the stopping criterion for the optimizer
         self.eps = 1e-15 #step size for finite-difference derivative estimates
         self.feas_eps = 1e-06
+        self.initial = 0 #Hilfsvariable
+        self.normalize_input = normalize_input
 
     def scipy_policy_improvement_for_this_state(self, model, state, t, initial_guess, VF_initial_guess, contr_initial_guess, iteration = 0):
         '''Policy improvement step with scipy'''
@@ -37,25 +41,18 @@ class Algorithm:
     #        pdb.set_trace()
             decision = md.convert_array_to_decision(x)
             input = [model.transition(self, decision, state), state.energy, state.price]
-            norm = np.linalg.norm(input)
-            normalized_input = input/norm if norm > self.eps else input
-            return - model.contribution(self, decision, state) - norm * self.VF_approximation[t].predict(np.array([normalized_input]))
-        #obj_fct = lambda decision: - model.contribution(self, md.convert_array_to_decision(decision), state) - self.VF_approximation[t].predict(np.array([[model.transition(md.convert_array_to_decision(decision), state), state.energy, state.price]]))
-
+            factor = np.linalg.norm(input) if self.normalize_input else 1
+            return - model.contribution(self, decision, state) - factor * self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([input])))
 
         def VF_obj_fct(x):
             decision = md.convert_array_to_decision(x)
             input = np.array([model.transition(self, decision, state), state.energy, state.price])
-            norm = np.linalg.norm(input)
-            normalized_input = input/norm
-            return  - norm * self.VF_approximation[t].predict(np.array([normalized_input]))
+            factor = np.linalg.norm(input) if self.normalize_input else 1
+            return  - factor *self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([input])))
 
         def contr_obj_fct(x):
             return - model.contribution(self, md.convert_array_to_decision(x), state)
 
-
-    #   VF_obj_fct = lambda decision:  - self.VF_approximation[t].predict(np.array([[model.transition(self, md.convert_array_to_decision(decision), state), state.energy, state.price]]))
-    #    contr_obj_fct = lambda decision: - model.contribution(self, md.convert_array_to_decision(decision), state)
         bnds = ((0, const3), (0, const1), (0, state.demand), (0, const2), (0, const2), (0, const1)) #approximation: open intervals (since closed intervals not available as bounds)
         beta_d = model.discharge_efficiency
         cons = ({'type': 'eq', 'fun': lambda x: x[0] + beta_d * x[1] + x[2]  - state.demand},
@@ -78,6 +75,8 @@ class Algorithm:
         const1 =  min(state.storage, model.max_discharge)
         const2 = min(model.R_max - state.storage, model.max_charge)
         const3 = min(state.energy, state.demand)
+#        if t==1:
+#            pdb.set_trace()
 
         if self.optimizer_choice == 0:
             # Set initial guess
@@ -109,9 +108,8 @@ class Algorithm:
                 state = md.State(stor, ener, price, dem)
                 decision = md.Decision(x0, x1, x2, x3, x4, x5)
                 input = [model.transition(self, decision, state), state.energy, state.price]
-                norm = np.linalg.norm(input)
-                normalized_input = input/norm
-                return (infeasibility_indicator(x, *params) * 1e6 - model.contribution(self, decision, state)  - norm * self.VF_approximation[t].predict(np.array([normalized_input])))
+                factor = np.linalg.norm(input) if self.normalize_input else 1
+                return (infeasibility_indicator(x, *params) * 1e6 - model.contribution(self, decision, state)  - factor*self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([input]))))
 
             def contr_objective(x, *params):
                 x0, x1, x2, x3, x4, x5 = x
@@ -119,16 +117,15 @@ class Algorithm:
                 state = md.State(stor, ener, price, dem)
                 decision = md.Decision(x0, x1, x2, x3, x4, x5)
                 return (infeasibility_indicator(x, *params) * 1e6 - model.contribution(self, decision, state))
-            #TODO: Adjust to scaling
+
             def VF_objective(x, *params):
                 x0, x1, x2, x3, x4, x5 = x
                 stor, ener, price, dem, t = params
                 state = md.State(stor, ener, price, dem)
                 decision = md.Decision(x0, x1, x2, x3, x4, x5)
                 input = [model.transition(self, decision, state), state.energy, state.price]
-                norm = np.linalg.norm(input)
-                normalized_input = input/norm
-                return (infeasibility_indicator(x, *params) * 1e6  - norm * self.VF_approximation[t].predict(np.array([normalized_input])))
+                factor = np.linalg.norm(input) if self.normalize_input else 1
+                return (infeasibility_indicator(x, *params) * 1e6  - factor*self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([input]))))
 
 
             #TODO: different stepsize?
@@ -150,8 +147,12 @@ class Algorithm:
 ################################
         #solve maximization problem with Artelys Knitro Solver (student free trial version)
         else:
-            solution = policy_improvement.maximize(model, self, state, lambda decision: self.VF_approximation[t].predict(np.array([[model.transition(self, md.convert_array_to_decision(decision), state), state.energy, state.price]])), t) #GPy version
-            VF_solution = policy_improvement_VF_only.maximize(model, state, lambda decision: self.VF_approximation[t].predict(np.array([[model.transition(self, md.convert_array_to_decision(decision), state), state.energy, state.price]])), t) #GPy version
+        #TODO: für normalize_input case anpassen!
+            if self.normalize_input:
+                print("knitro policy improvement muss noch normalize_input angepasst werden!")
+                return
+            solution = policy_improvement.maximize(model, self, state, lambda decision: self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([[model.transition(self, md.convert_array_to_decision(decision), state), state.energy, state.price]]))), t) #GPy version
+            VF_solution = policy_improvement_VF_only.maximize(model, state, lambda decision: self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([[model.transition(self, md.convert_array_to_decision(decision), state), state.energy, state.price]]))), t) #GPy version
             contr_solution = policy_improvement_contr_only.maximize(model, self, state, t) #GPy version
 
         print("Iteration", iteration, " at time", t, solution)
@@ -159,15 +160,13 @@ class Algorithm:
         print("Post-decision storage after", t, ":", model.transition(self, md.convert_array_to_decision(solution), state))
         print("Solution is feasible:", model.is_feasible(self, md.convert_array_to_decision(solution), state))
         input1 = [model.transition(self, md.convert_array_to_decision(solution), state), state.energy, state.price]
-        norm1 = np.linalg.norm(input1)
-        normalized_input1 = input1/norm1
+        norm1 = np.linalg.norm(input1) if self.normalize_input else 1
         input2 = [model.transition(self, md.convert_array_to_decision(VF_solution), state), state.energy, state.price]
-        norm2 = np.linalg.norm(input2)
-        normalized_input2 = input2/norm2
-        print("VF_approximation at solution:", norm1 * self.VF_approximation[t].predict(np.array([normalized_input1]))) #GPy version
+        norm2 = np.linalg.norm(input2) if self.normalize_input else 1
+        print("VF_approximation at solution:", norm1*self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([input1])))) #GPy version
         print("Contribution at solution:", model.contribution(self, md.convert_array_to_decision(solution), state))
         print("Optimal contribution obtained at ", contr_solution, "with contribution value:", model.contribution(self, md.convert_array_to_decision(contr_solution), state))
-        print("Optimal VF obtained at ", VF_solution, "with VF value:", norm2 * self.VF_approximation[t].predict(np.array([normalized_input2])))
+        print("Optimal VF obtained at ", VF_solution, "with VF value:", norm2*self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([input2]))))
         return md.convert_array_to_decision(solution)
 
     def approx_policy_evaluation_and_update_VF(self, model, iteration):
@@ -189,21 +188,15 @@ class Algorithm:
                 if model.is_deterministic: #TODO: change?
                     state_m.energy = np.random.uniform(model.E_min, model.E_max)
                     state_m.price = np.random.uniform(model.P_min, model.P_max)
-                if iteration!= 0:
+                if iteration!= 0 or self.initial==1:
                     print("Episode ", m)
-
-                    #TODO:DELETE
-                    #if m == 8 and iteration == 1 and t == 3:
-                    #    state_m.storage = 3.506639423278557e-13
-                    #    pdb.set_trace()
-
                     decision_m =  self.policy_improvement_for_this_state(model, state_m, t, iteration)
                 else:
                     # Set initial policy (randomized, while satisfying feasibility constraints)
                     wd = np.random.uniform(0, min(state_m.demand, state_m.energy))
                     rd = np.random.uniform(0, min(state_m.storage, model.max_discharge, (state_m.demand - wd))/ model.discharge_efficiency)
                     gd = max(0, state_m.demand - wd - rd * model.discharge_efficiency) #not randomized, in order to satisfy demand/be feasible
-                    wr = np.random.uniform(0, min(state_m.energy - wd, model.max_charge, model.R_max - state_m.energy))
+                    wr = np.random.uniform(0, min(state_m.energy - wd, model.max_charge, model.R_max - state_m.storage))
                     rg = np.random.uniform(0, max(0, min(state_m.storage - rd, model.max_discharge - rd)))
                     gr = np.random.uniform(0, max(0, min((model.R_max - state_m.storage - model.charge_efficiency * wr + rd + rg)/ model.charge_efficiency, model.max_charge - wr)))
 
@@ -218,19 +211,20 @@ class Algorithm:
 
         #Calculate the VF Approximations:
         for t in range(model.t_max):
-    #        pdb.set_trace()
+#            pdb.set_trace()
             pd_samples_t = np.array([pdstates[m][t] for m in range(self.episode_max)])
             value_samples_t = np.array([[agg_values[m][t]] for m in range(self.episode_max)]) # GPy version
     #        value_samples_t = np.array([agg_values[m][t] for m in range(self.episode_max)])
 
-            temp = normalize(pd_samples_t, norm = 'l2', return_norm = True)
-            pd_samples_t = temp[0]
-            norms = temp[1]
-            value_samples_t = np.array([[value_samples_t[i][0] /norms[i]] for i in range(self.episode_max)])
+            if self.normalize_input:
+                norms = np.sum(np.abs(pd_samples_t)**2,axis=-1)**(1./2) #calculate l2-norm for each pdstate
+                value_samples_t = np.array([[value_samples_t[i][0] /norms[i]] for i in range(self.episode_max)])
+            pd_samples_t_preprocessed = self.preprocessor[t].fit_transform(pd_samples_t)
 
-            self.VF_approximation[t].fit(pd_samples_t, value_samples_t)
+            self.VF_approximation[t].fit(pd_samples_t_preprocessed, value_samples_t)
             print("for iteration", iteration, "fitted approximation for time", t)
-
+            self.initial = 1
+        #    pdb.set_trace()
 
     def approximate_policy_iteration(self, model, dataset, dataset_type):
         '''Performs approximate policy iteration step
@@ -266,7 +260,12 @@ class Algorithm:
                     ax.set_zlabel('VF')
                     X_test = np.array([[x for i in np.arange(0, model.R_max, 1)] for x in np.arange(0, model.max_discharge, 0.001)])
                     Y_test = np.array([[y for y in np.arange(0, model.R_max, 1)] for i in np.arange(0, model.max_discharge, 0.001)])
-                    Z_test = np.array([[  self.VF_approximation[t].predict(np.array([[model.transition(self, md.convert_array_to_decision([0.019, 0, 0, x, 0, 0]), md.State(y, 0.05, 23, 0.019)), 0.05, 28]/np.linalg.norm(np.array([model.transition(self, md.convert_array_to_decision([0.019, 0, 0, x, 0, 0]), md.State(y, 0.05, 23, 0.019)), 0.05, 28]))]))[0][0] for y in np.arange(0, model.R_max, 1)] for x in np.arange(0, model.max_discharge, 0.001)])  #GPy Version
+                    if self.normalize_input:
+                        print("Z_test muss noch an normalize_input angepasst werden!")
+                        return
+                        #Z_test = np.array([[  self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([[model.transition(self, md.convert_array_to_decision([0.019, 0, 0, x, 0, 0]), md.State(y, 0.05, 23, 0.019)), 0.05, 28]])))[0][0] for y in np.arange(0, model.R_max, 1)] for x in np.arange(0, model.max_discharge, 0.001)])  #GPy Version
+                    else:
+                        Z_test = np.array([[  self.VF_approximation[t].predict(self.preprocessor[t].transform(np.array([[model.transition(self, md.convert_array_to_decision([0.019, 0, 0, x, 0, 0]), md.State(y, 0.05, 23, 0.019)), 0.05, 28]])))[0][0] for y in np.arange(0, model.R_max, 1)] for x in np.arange(0, model.max_discharge, 0.001)])  #GPy Version
         #            Z_test = np.array([[  self.VF_approximation[t].predict(np.array([[model.transition(self, md.convert_array_to_decision([0.019, 0, 0, x, 0, 0]), md.State(y, 0.05, 28, 0.019)), 0.05, 28]]))[0] for y in np.arange(0, model.R_max, 1)] for x in np.arange(0, model.max_discharge, 0.001)])
                     ax.plot_surface(X_test,Y_test,Z_test, rstride = 10, cstride = 10)
                     fig.canvas.set_window_title('VF approximation at time ' + str(t))
@@ -275,7 +274,7 @@ class Algorithm:
 
             if plot_bool_2D == 1:
                 for t in range(model.t_max):
-                    plt.plot([model.transition(self, md.Decision(1, 0, 0, 3, 0, 1), md.State(R, 6, 37, 2)) for R in range(0, model.R_max, 1)], [self.VF_approximation[t].predict([[model.transition(self, md.Decision(1, 0, 0, 3, 0, 1), md.State(R, 6, 37, 2)), 6, 37]])[0] for R in range(0, model.R_max, 1)])
+                    plt.plot([model.transition(self, md.Decision(1, 0, 0, 3, 0, 1), md.State(R, 6, 37, 2)) for R in range(0, model.R_max, 1)], [self.VF_approximation[t].predict(self.preprocessor[t].transform([[model.transition(self, md.Decision(1, 0, 0, 3, 0, 1), md.State(R, 6, 37, 2)), 6, 37]]))[0] for R in range(0, model.R_max, 1)])
                     plt.xlabel('Storage R')
                     plt.ylabel('Post-decision VF')
                     plt.show()
