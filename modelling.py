@@ -81,12 +81,8 @@ class Model:
         new_storage = state.storage + self.charge_efficiency * (decision.dec_wr + decision.dec_gr) - (decision.dec_rd + decision.dec_rg)
         if new_storage < 0 and abs(new_storage) < algo.feas_eps:
             return 0
-        if new_storage > self.R_max:
-            if abs(self.R_max - new_storage) < algo.feas_eps:
-                return self.R_max
-            else:
-                print("ERROR: R_max was crossed.")
-                return  
+        if new_storage > self.R_max and abs(self.R_max - new_storage) < algo.feas_eps:
+            return self.R_max
         return new_storage
 
     def contribution(self, algo, decision, state):
